@@ -231,17 +231,98 @@ export function encodePortableLink(board: Board): string {
   return url.toString();
 }
 
+function b64urlEncode(bytes: Uint8Array): string {
+  let s = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    s += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + 0x8000)));
+  }
+  return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function b64urlDecode(b64: string): Uint8Array {
+  const bin = atob(b64.replace(/-/g, '+').replace(/_/g, '/'));
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+/**
+ * Compressed portable link. The board snapshot is gzipped (when available)
+ * and embedded in the URL, so the link opens the exact board on any device
+ * with no account and no server. Falls back to plain encoding where the
+ * CompressionStream API is missing.
+ */
+export async function createPortableLink(board: Board, baseHref?: string): Promise<{ url: string; chars: number }> {
+  const payload = JSON.stringify({
+    n: board.name,
+    e: board.elements,
+    b: board.background,
+    s: board.share.permission,
+  });
+  let d = '';
+  try {
+    if (typeof CompressionStream !== 'undefined') {
+      const stream = new Blob([payload]).stream().pipeThrough(new CompressionStream('gzip'));
+      const buf = await new Response(stream).arrayBuffer();
+      d = 'z.' + b64urlEncode(new Uint8Array(buf));
+    }
+  } catch {
+    d = '';
+  }
+  if (!d) {
+    d =
+      'r.' +
+      btoa(unescape(encodeURIComponent(payload)))
+        .replace(/\+/g, '-')
+        .replace(/\//g, '_')
+        .replace(/=+$/, '');
+  }
+  const url = new URL(baseHref ?? window.location.href);
+  url.hash = `#/s/${board.id}?p=${board.share.permission}&d=${d}`;
+  return { url: url.toString(), chars: url.toString().length };
+}
+
 export function decodePortableHash(hash: string): { name: string; elements: any[]; background: string; permission: string } | null {
   try {
     const m = hash.match(/[?&]d=([^&]+)/);
     if (!m) return null;
-    const b64 = m[1].replace(/-/g, '+').replace(/_/g, '/');
+    const d = m[1];
+    // async gzip payloads need decodePortableData; this stays for raw payloads
+    if (d.startsWith('z.')) return null;
+    const raw = d.startsWith('r.') ? d.slice(2) : d;
+    const b64 = raw.replace(/-/g, '+').replace(/_/g, '/');
     const json = decodeURIComponent(escape(atob(b64)));
     const p = JSON.parse(json);
     return { name: p.n ?? 'Shared board', elements: p.e ?? [], background: p.b ?? '#FAF9F6', permission: p.s ?? 'view' };
   } catch {
     return null;
   }
+}
+
+/** Async decode for compressed (`z.`) payloads; falls back to raw formats. */
+export async function decodePortableData(d: string): Promise<{ name: string; elements: any[]; background: string; permission: string } | null> {
+  try {
+    let json: string | null = null;
+    if (d.startsWith('z.')) {
+      const bytes = b64urlDecode(d.slice(2));
+      const stream = new Blob([bytes as BlobPart]).stream().pipeThrough(new DecompressionStream('gzip'));
+      const buf = await new Response(stream).arrayBuffer();
+      json = new TextDecoder().decode(buf);
+    } else {
+      const raw = d.startsWith('r.') ? d.slice(2) : d;
+      const b64 = raw.replace(/-/g, '+').replace(/_/g, '/');
+      json = decodeURIComponent(escape(atob(b64)));
+    }
+    const p = JSON.parse(json);
+    return { name: p.n ?? 'Shared board', elements: p.e ?? [], background: p.b ?? '#FAF9F6', permission: p.s ?? 'view' };
+  } catch {
+    return null;
+  }
+}
+
+export function portableParam(hash: string): string | null {
+  const m = hash.match(/[?&]d=([^&]+)/);
+  return m ? m[1] : null;
 }
 
 export function boardUrl(id: string): string {

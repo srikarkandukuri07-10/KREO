@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import type { Board } from './types';
 import Dashboard from './components/Dashboard';
 import Editor from './components/Editor';
-import { createBoard, decodePortableHash, listBoards, loadBoard, normalizeBoard, saveBoard } from './lib/storage';
+import { createBoard, decodePortableData, decodePortableHash, listBoards, loadBoard, normalizeBoard, portableParam, saveBoard } from './lib/storage';
 
 type Route =
   | { name: 'dash' }
@@ -106,24 +106,50 @@ function BoardRoute({ id, onExit, notify }: { id: string; onExit: () => void; no
   );
 }
 
+function portableToBoard(id: string, decoded: { name: string; elements: any[]; background: string; permission: string }): Board {
+  const now = Date.now();
+  return normalizeBoard({
+    id, name: decoded.name, createdAt: now, updatedAt: now,
+    elements: decoded.elements, view: { x: 0, y: 0, zoom: 1 },
+    share: { mode: 'public' as const, permission: (decoded.permission === 'edit' ? 'edit' : 'view') as 'view' | 'edit' },
+    background: decoded.background, grid: false, snap: false,
+  } as Board);
+}
+
 function SharedRoute({ id, onExit, notify }: { id: string; onExit: () => void; notify: (m: string) => void }) {
-  const [board] = useState<Board | null>(() => {
+  const [board, setBoard] = useState<Board | null>(() => {
     // 1. local board with this id?
     const local = loadBoard(id);
     if (local) return local;
-    // 2. portable payload embedded in URL?
+    // 2. raw (sync-decodable) portable payload?
     const decoded = decodePortableHash(window.location.hash);
-    if (decoded) {
-      const now = Date.now();
-      return normalizeBoard({
-        id, name: decoded.name, createdAt: now, updatedAt: now,
-        elements: decoded.elements, view: { x: 0, y: 0, zoom: 1 },
-        share: { mode: 'public' as const, permission: (decoded.permission === 'edit' ? 'edit' : 'view') as 'view' | 'edit' },
-        background: decoded.background, grid: false, snap: false,
-      } as Board);
-    }
+    if (decoded) return portableToBoard(id, decoded);
     return null;
   });
+  const [loading, setLoading] = useState(() => !loadBoard(id) && !decodePortableHash(window.location.hash) && !!portableParam(window.location.hash));
+
+  useEffect(() => {
+    if (board || !portableParam(window.location.hash)) return;
+    let live = true;
+    decodePortableData(portableParam(window.location.hash)!).then((decoded) => {
+      if (!live) return;
+      if (decoded) setBoard(portableToBoard(id, decoded));
+      setLoading(false);
+    });
+    return () => { live = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id]);
+
+  if (loading) {
+    return (
+      <div className="kreo-dash">
+        <div className="kreo-dash-inner" style={{ textAlign: 'center', paddingTop: 80 }}>
+          <h2>Opening shared board…</h2>
+          <p style={{ color: 'var(--muted)' }}>Unpacking the shared snapshot.</p>
+        </div>
+      </div>
+    );
+  }
 
   if (!board) {
     return (
