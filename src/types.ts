@@ -136,6 +136,8 @@ export interface Board {
   background: string;
   grid: boolean;
   snap: boolean;
+  /** attachment-migration version (legacy co-select groups → attach) */
+  attachMigrated?: number;
 }
 
 export interface AppSettings {

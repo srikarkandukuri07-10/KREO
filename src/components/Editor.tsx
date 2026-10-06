@@ -1012,6 +1012,9 @@ export default function Editor({ initial, readOnly, sharedBanner, onExit, notify
       if (Math.abs(d.w) >= minSize || Math.abs(d.h) >= minSize) {
         checkpoint();
         const fixed = normalizeShape(d);
+        // drafts share a placeholder id — every committed shape needs its own,
+        // otherwise all shapes select/move/delete as one
+        fixed.id = uid();
         fixed.updatedAt = Date.now();
         const next = [...clone(elsRef.current), clone(fixed)];
         applyElements(next);

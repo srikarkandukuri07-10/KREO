@@ -1,7 +1,7 @@
 import type { AppSettings, Board, KreoElement } from '../types';
 import { DEFAULT_SETTINGS } from '../types';
 import { bboxOf } from './geometry';
-import { boardId } from './id';
+import { boardId, uid } from './id';
 
 const INDEX_KEY = 'kreo.boards.index.v1';
 const BOARD_KEY = (id: string) => `kreo.board.${id}.v1`;
@@ -49,6 +49,51 @@ export function normalizeBoard(board: Board): Board {
     }
     return el;
   });
+  let migrated = board.attachMigrated ?? 0;
+  dedupeIds(elements);
+  if (migrated < 2) {
+    migrateLegacyGroups(elements);
+    migrated = 2;
+  }
+  return { ...board, elements, attachMigrated: migrated };
+}
+
+/**
+ * Repair pass: every element must have a unique id. Legacy shape-tool
+ * shapes could share the placeholder id ('draft'), which made them
+ * select/move/delete as one. Duplicates get fresh ids and their parent
+ * links are cleared (ambiguous); dangling parent links are cleared too.
+ */
+function dedupeIds(elements: KreoElement[]) {
+  const seen = new Set<string>();
+  for (const el of elements) {
+    if (!el.id || seen.has(el.id)) {
+      el.id = uid();
+      el.parentId = null;
+    }
+    seen.add(el.id);
+  }
+  const valid = new Set(elements.map((e) => e.id));
+  for (const el of elements) {
+    if (el.parentId && !valid.has(el.parentId)) el.parentId = null;
+  }
+}
+
+function overlapArea(a: { x: number; y: number; w: number; h: number }, b: { x: number; y: number; w: number; h: number }): number {
+  const ix = Math.max(0, Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x));
+  const iy = Math.max(0, Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y));
+  return ix * iy;
+}
+
+/**
+ * One-time conversion of legacy co-select groups into attachments: within a
+ * group, any smaller member substantially overlapping the largest member
+ * becomes its attached child (single-select, still moves together).
+ * Non-overlapping groups are genuine manual groups and stay grouped.
+ * Stamped with attachMigrated so groups you create yourself are never
+ * rewritten on later loads.
+ */
+function migrateLegacyGroups(elements: KreoElement[]) {
   const groups = new Map<string, KreoElement[]>();
   for (const el of elements) {
     if (el.groupId) {
@@ -57,7 +102,10 @@ export function normalizeBoard(board: Board): Board {
     }
   }
   for (const [, members] of groups) {
-    if (members.length < 2) continue;
+    if (members.length < 2) {
+      members[0].groupId = null;
+      continue;
+    }
     const area = (e: KreoElement) => {
       const b = bboxOf(e);
       return b.w * b.h;
@@ -65,28 +113,26 @@ export function normalizeBoard(board: Board): Board {
     const sorted = [...members].sort((a, b) => area(b) - area(a));
     const container = sorted[0];
     const cb = bboxOf(container);
-    const nested = sorted.slice(1).filter((m) => {
+    const attached = new Set<string>();
+    for (const m of sorted.slice(1)) {
       const mb = bboxOf(m);
-      const ix = Math.max(0, Math.min(mb.x + mb.w, cb.x + cb.w) - Math.max(mb.x, cb.x));
-      const iy = Math.max(0, Math.min(mb.y + mb.h, cb.y + cb.h) - Math.max(mb.y, cb.y));
-      return (ix * iy) / Math.max(1, mb.w * mb.h) >= 0.85;
-    });
-    if (!nested.length) continue;
-    const nestedIds = new Set(nested.map((e) => e.id));
+      const ratio = overlapArea(mb, cb) / Math.max(1, mb.w * mb.h);
+      if (ratio >= 0.15) attached.add(m.id);
+    }
+    if (!attached.size) continue;
     for (const el of elements) {
-      if (nestedIds.has(el.id)) {
+      if (attached.has(el.id)) {
         el.groupId = null;
         el.parentId = container.id;
       }
     }
-    const remaining = members.filter((e) => !nestedIds.has(e.id));
+    const remaining = members.filter((e) => !attached.has(e.id));
     if (remaining.length < 2) {
       for (const el of elements) {
-        if (el.groupId === container.groupId && !nestedIds.has(el.id)) el.groupId = null;
+        if (el.groupId === container.groupId && !attached.has(el.id)) el.groupId = null;
       }
     }
   }
-  return { ...board, elements };
 }
 
 export function saveBoard(board: Board): boolean {
