@@ -793,7 +793,7 @@ export default function Editor({ initial, readOnly, sharedBanner, onExit, notify
       const id = uid();
       const el = {
         id, type: 'text', x: snapVal(w.x, s.gridSize, s.snap), y: snapVal(w.y, s.gridSize, s.snap),
-        w: 200, h: 40, rotation: 0, text: '', fontSize: 20,
+        w: 200, h: 40, rotation: 0, text: '', fontSize: 65,
         fontFamily: s.defaultFont, bold: false, italic: false, align: 'left', lineHeight: 1.3,
         ...defaultElement('text', s),
       } as KreoElement;
