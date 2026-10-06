@@ -4,11 +4,12 @@ interface Props {
   x: number;
   y: number;
   hasSelection: boolean;
+  canDetach: boolean;
   onClose: () => void;
   onAction: (a: string) => void;
 }
 
-export default function ContextMenu({ x, y, hasSelection, onClose, onAction }: Props) {
+export default function ContextMenu({ x, y, hasSelection, canDetach, onClose, onAction }: Props) {
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -47,6 +48,7 @@ export default function ContextMenu({ x, y, hasSelection, onClose, onAction }: P
       <hr />
       {item('Group', '⌃G', 'group', !hasSelection)}
       {item('Ungroup', '⌃⇧G', 'ungroup', !hasSelection)}
+      {item('Detach from shape', '', 'detach', !canDetach)}
       {item('Lock', '', 'lock', !hasSelection)}
       {item('Unlock', '', 'unlock', !hasSelection)}
       <hr />

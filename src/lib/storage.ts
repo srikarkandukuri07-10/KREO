@@ -1,5 +1,6 @@
-import type { AppSettings, Board } from '../types';
+import type { AppSettings, Board, KreoElement } from '../types';
 import { DEFAULT_SETTINGS } from '../types';
+import { bboxOf } from './geometry';
 import { boardId } from './id';
 
 const INDEX_KEY = 'kreo.boards.index.v1';
@@ -30,7 +31,62 @@ export function listBoardIds(): string[] {
 }
 
 export function loadBoard(id: string): Board | null {
-  return readJSON<Board | null>(BOARD_KEY(id), null);
+  const b = readJSON<Board | null>(BOARD_KEY(id), null);
+  return b ? normalizeBoard(b) : null;
+}
+
+/**
+ * Normalize a board loaded from storage (or a share payload):
+ * - guarantees the parentId field exists on every element
+ * - converts legacy auto-attach groups (one member containing ≥85% of
+ *   another's area) into parent/child attachments so each object selects
+ *   individually again; genuine side-by-side groups are untouched.
+ */
+export function normalizeBoard(board: Board): Board {
+  const elements = board.elements.map((el: KreoElement) => {
+    if ((el as KreoElement).parentId === undefined) {
+      return { ...el, parentId: null };
+    }
+    return el;
+  });
+  const groups = new Map<string, KreoElement[]>();
+  for (const el of elements) {
+    if (el.groupId) {
+      if (!groups.has(el.groupId)) groups.set(el.groupId, []);
+      groups.get(el.groupId)!.push(el);
+    }
+  }
+  for (const [, members] of groups) {
+    if (members.length < 2) continue;
+    const area = (e: KreoElement) => {
+      const b = bboxOf(e);
+      return b.w * b.h;
+    };
+    const sorted = [...members].sort((a, b) => area(b) - area(a));
+    const container = sorted[0];
+    const cb = bboxOf(container);
+    const nested = sorted.slice(1).filter((m) => {
+      const mb = bboxOf(m);
+      const ix = Math.max(0, Math.min(mb.x + mb.w, cb.x + cb.w) - Math.max(mb.x, cb.x));
+      const iy = Math.max(0, Math.min(mb.y + mb.h, cb.y + cb.h) - Math.max(mb.y, cb.y));
+      return (ix * iy) / Math.max(1, mb.w * mb.h) >= 0.85;
+    });
+    if (!nested.length) continue;
+    const nestedIds = new Set(nested.map((e) => e.id));
+    for (const el of elements) {
+      if (nestedIds.has(el.id)) {
+        el.groupId = null;
+        el.parentId = container.id;
+      }
+    }
+    const remaining = members.filter((e) => !nestedIds.has(e.id));
+    if (remaining.length < 2) {
+      for (const el of elements) {
+        if (el.groupId === container.groupId && !nestedIds.has(el.id)) el.groupId = null;
+      }
+    }
+  }
+  return { ...board, elements };
 }
 
 export function saveBoard(board: Board): boolean {
@@ -87,13 +143,17 @@ export function duplicateBoard(src: Board): Board {
     createdAt: now,
     updatedAt: now,
   };
-  // regenerate element ids so copies are independent
+  // regenerate element ids so copies are independent (remap parent links too)
   const idMap = new Map<string, string>();
   copy.elements = copy.elements.map((el: any) => {
     const nid = `el_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 9)}`;
     idMap.set(el.id, nid);
     return { ...el, id: nid };
   });
+  for (const el of copy.elements as KreoElement[]) {
+    if (el.parentId && idMap.has(el.parentId)) el.parentId = idMap.get(el.parentId)!;
+    else if (el.parentId) el.parentId = null;
+  }
   saveBoard(copy);
   return copy;
 }

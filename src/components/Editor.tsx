@@ -56,6 +56,7 @@ function defaultElement(tool: ToolId, s: AppSettings): Partial<KreoElement> {
     roundness: 0.3,
     locked: false,
     groupId: null,
+    parentId: null,
   } as Partial<KreoElement>;
 }
 
@@ -479,7 +480,11 @@ export default function Editor({ initial, readOnly, sharedBanner, onExit, notify
     if (readOnlyRef.current || !selRef.current.length) return;
     checkpoint();
     const ids = new Set(selRef.current);
-    applyElements(elsRef.current.filter((e) => !ids.has(e.id)));
+    // children of deleted parents are orphaned (kept), never cascade-deleted
+    const next = elsRef.current
+      .filter((e) => !ids.has(e.id))
+      .map((e) => (e.parentId && ids.has(e.parentId) ? { ...e, parentId: null, updatedAt: Date.now() } : e));
+    applyElements(next);
     setSelected([]);
     broadcastElements();
   }, []);
@@ -487,20 +492,34 @@ export default function Editor({ initial, readOnly, sharedBanner, onExit, notify
   const duplicateSelected = useCallback(() => {
     if (readOnlyRef.current || !selRef.current.length) return;
     checkpoint();
-    const src = elsRef.current.filter((e) => selRef.current.includes(e.id));
-    const copies = clone(src).map((e) => ({ ...e, id: uid(), x: e.x + 24, y: e.y + 24, updatedAt: Date.now() }));
-    if (copies[0]?.type === 'pen') {
-      for (const c of copies) {
-        if (c.type === 'pen') c.points = c.points.map((p) => ({ x: p.x + 24, y: p.y + 24 }));
+    // selected parents bring their attached children along; parent links are
+    // remapped onto the copies, anything pointing outside is detached
+    const ids = familyClosure(elsRef.current, selRef.current);
+    const src = elsRef.current.filter((e) => ids.has(e.id));
+    const idMap = new Map<string, string>();
+    for (const e of src) idMap.set(e.id, uid());
+    const copies = clone(src).map((e) => {
+      const c = {
+        ...e, id: idMap.get(e.id)!, x: e.x + 24, y: e.y + 24, updatedAt: Date.now(),
+        parentId: e.parentId && idMap.has(e.parentId) ? idMap.get(e.parentId)! : null,
+      };
+      if (c.type === 'pen') {
+        c.points = c.points.map((p) => ({ x: p.x + 24, y: p.y + 24 }));
       }
-    }
+      if (c.type === 'triangle' && c.pts) {
+        c.pts = c.pts.map((p) => ({ x: p.x + 24, y: p.y + 24 }));
+      }
+      return c;
+    });
     applyElements([...elsRef.current, ...copies]);
     setSelected(copies.map((c) => c.id));
     broadcastElements();
   }, []);
 
   const copySelected = useCallback(() => {
-    const src = elsRef.current.filter((e) => selRef.current.includes(e.id));
+    // parents bring their attached children so paste reproduces the assembly
+    const ids = familyClosure(elsRef.current, selRef.current);
+    const src = elsRef.current.filter((e) => ids.has(e.id));
     clipboardRef.current = clone(src);
     try {
       localStorage.setItem('kreo.clipboard', JSON.stringify(src));
@@ -519,10 +538,20 @@ export default function Editor({ initial, readOnly, sharedBanner, onExit, notify
     }
     if (!src.length) return;
     checkpoint();
-    const copies: KreoElement[] = clone(src).map((e: KreoElement) => {
-      const c: KreoElement = { ...e, id: uid(), x: e.x + 32, y: e.y + 32, updatedAt: Date.now() };
+    // remap parent links inside the pasted set; links pointing outside (the
+    // original parent wasn't copied) are detached so pastes never tug old art
+    const idMap = new Map<string, string>();
+    for (const e of clone(src) as KreoElement[]) idMap.set(e.id, uid());
+    const copies: KreoElement[] = (clone(src) as KreoElement[]).map((e: KreoElement) => {
+      const c: KreoElement = {
+        ...e, id: idMap.get(e.id)!, x: e.x + 32, y: e.y + 32, updatedAt: Date.now(),
+        parentId: e.parentId && idMap.has(e.parentId) ? idMap.get(e.parentId)! : null,
+      };
       if (c.type === 'pen') {
         c.points = c.points.map((p: Pt) => ({ x: p.x + 32, y: p.y + 32 }));
+      }
+      if (c.type === 'triangle' && c.pts) {
+        c.pts = c.pts.map((p: Pt) => ({ x: p.x + 32, y: p.y + 32 }));
       }
       return c;
     });
@@ -544,14 +573,39 @@ export default function Editor({ initial, readOnly, sharedBanner, onExit, notify
 
   const ungroupSelected = useCallback(() => {
     if (readOnlyRef.current || !selRef.current.length) return;
-    checkpoint();
     const groups = new Set(
       elsRef.current.filter((e) => selRef.current.includes(e.id) && e.groupId).map((e) => e.groupId as string)
     );
-    if (!groups.size) return;
-    applyElements(elsRef.current.map((e) => (e.groupId && groups.has(e.groupId) ? { ...e, groupId: null, updatedAt: Date.now() } : e)));
+    const detachIds = new Set(
+      elsRef.current.filter((e) => selRef.current.includes(e.id) && e.parentId).map((e) => e.id)
+    );
+    if (!groups.size && !detachIds.size) return;
+    checkpoint();
+    applyElements(elsRef.current.map((e) => {
+      const inGroup = e.groupId && groups.has(e.groupId);
+      const detach = detachIds.has(e.id);
+      if (!inGroup && !detach) return e;
+      return {
+        ...e,
+        groupId: inGroup ? null : e.groupId,
+        parentId: detach ? null : e.parentId,
+        updatedAt: Date.now(),
+      };
+    }));
     broadcastElements();
-    notify('Ungrouped');
+    notify(detachIds.size ? 'Detached from shape' : 'Ungrouped');
+  }, [notify]);
+
+  const detachSelected = useCallback(() => {
+    if (readOnlyRef.current || !selRef.current.length) return;
+    const ids = new Set(selRef.current);
+    if (!elsRef.current.some((e) => ids.has(e.id) && e.parentId)) return;
+    checkpoint();
+    applyElements(elsRef.current.map((e) =>
+      ids.has(e.id) && e.parentId ? { ...e, parentId: null, updatedAt: Date.now() } : e
+    ));
+    broadcastElements();
+    notify('Detached — now moves on its own');
   }, [notify]);
 
   const lockSelected = useCallback((lock: boolean) => {
@@ -844,7 +898,8 @@ export default function Editor({ initial, readOnly, sharedBanner, onExit, notify
 
     if (g.mode === 'move') {
       const dx = w.x - g.startWX, dy = w.y - g.startWY;
-      const ids = new Set(selRef.current);
+      // attached children travel with their parent
+      const ids = familyClosure(g.snapshot, selRef.current);
       const snap = s.snap;
       const next = g.snapshot.map((el) => {
         if (!ids.has(el.id)) return el;
@@ -857,7 +912,7 @@ export default function Editor({ initial, readOnly, sharedBanner, onExit, notify
     }
 
     if (g.mode === 'resize' && g.handle) {
-      const next = resizeSnapshot(g.snapshot, new Set(selRef.current), g.handle, g.startWX, g.startWY, w.x, w.y, e.shiftKey, s);
+      const next = resizeSnapshot(g.snapshot, familyClosure(g.snapshot, selRef.current), g.handle, g.startWX, g.startWY, w.x, w.y, e.shiftKey, s);
       applyElementsNoHistory(next);
       return;
     }
@@ -866,8 +921,8 @@ export default function Editor({ initial, readOnly, sharedBanner, onExit, notify
       const ang = Math.atan2(w.y - g.center.y, w.x - g.center.x);
       let deg = ((ang - g.startAngle) * 180) / Math.PI;
       if (e.shiftKey) deg = Math.round(deg / 15) * 15;
-      const ids = new Set(selRef.current);
-      const els = elsRef.current.filter((x) => ids.has(x.id));
+      const ids = familyClosure(g.snapshot, selRef.current);
+      const els = g.snapshot.filter((x) => ids.has(x.id));
       let next: KreoElement[];
       if (els.length === 1) {
         next = g.snapshot.map((el) =>
@@ -974,6 +1029,19 @@ export default function Editor({ initial, readOnly, sharedBanner, onExit, notify
       undoRef.current.push(g.snapshot);
       if (undoRef.current.length > 120) undoRef.current.shift();
       redoRef.current = [];
+      if (g.mode === 'erase') {
+        // orphan children of erased parents instead of deleting them too
+        const gone = new Set(
+          g.snapshot.filter((se) => !elsRef.current.some((e) => e.id === se.id)).map((e) => e.id)
+        );
+        if (gone.size) {
+          applyElements(
+            elsRef.current.map((e) =>
+              e.parentId && gone.has(e.parentId) ? { ...e, parentId: null, updatedAt: Date.now() } : e
+            )
+          );
+        }
+      }
       setBoard((b) => ({ ...b, updatedAt: Date.now() }));
       broadcastElements();
       draw();
@@ -988,6 +1056,12 @@ export default function Editor({ initial, readOnly, sharedBanner, onExit, notify
       // edit without selection chrome; selection is restored on commit/cancel
       setSelected([]);
       setEditingText({ id: hit.id, draft: hit.text });
+      return;
+    }
+    // double-click drills out: select the whole manual group at once
+    if (hit?.groupId) {
+      setSelected(elsRef.current.filter((x) => x.groupId === hit.groupId).map((x) => x.id));
+      draw();
     }
   };
 
@@ -1097,11 +1171,11 @@ export default function Editor({ initial, readOnly, sharedBanner, onExit, notify
             id: uid(), type: 'image',
             x: cx - wpx / 2 + i * 24, y: cy - hpx / 2 + i * 24, w: wpx, h: hpx, rotation: 0,
             stroke: '#1a1a1a', fill: 'transparent', strokeWidth: 2, strokeStyle: 'solid',
-            opacity: 100, roughness: 0, roundness: 0, locked: false, groupId: null,
+            opacity: 100, roughness: 0, roundness: 0, locked: false, groupId: null, parentId: null,
             createdAt: Date.now(), updatedAt: Date.now(),
             src, naturalW: img.naturalWidth, naturalH: img.naturalHeight,
           } as KreoElement;
-          const next = [...clone(elsRef.current), el];
+          const next = attachBelow([...clone(elsRef.current), el], el.id);
           applyElements(next);
           setSelected([el.id]);
           broadcastElements();
@@ -1348,6 +1422,7 @@ export default function Editor({ initial, readOnly, sharedBanner, onExit, notify
             if (a === 'duplicate') duplicateSelected();
             if (a === 'group') groupSelected();
             if (a === 'ungroup') ungroupSelected();
+            if (a === 'detach') detachSelected();
             if (a === 'lock') lockSelected(true);
             if (a === 'unlock') lockSelected(false);
             if (a === 'front' || a === 'back' || a === 'forward' || a === 'backward') reorder(a);
@@ -1360,6 +1435,7 @@ export default function Editor({ initial, readOnly, sharedBanner, onExit, notify
           x={ctxMenu.x}
           y={ctxMenu.y}
           hasSelection={selected.length > 0}
+          canDetach={selected.length > 0 && elements.some((e) => selected.includes(e.id) && e.parentId)}
           onClose={() => setCtxMenu(null)}
           onAction={(a) => {
             setCtxMenu(null);
@@ -1371,6 +1447,7 @@ export default function Editor({ initial, readOnly, sharedBanner, onExit, notify
             if (a === 'delete') deleteSelected();
             if (a === 'group') groupSelected();
             if (a === 'ungroup') ungroupSelected();
+            if (a === 'detach') detachSelected();
             if (a === 'lock') lockSelected(true);
             if (a === 'unlock') lockSelected(false);
             if (['front', 'back', 'forward', 'backward'].includes(a)) reorder(a as any);
@@ -1572,7 +1649,8 @@ function buildShape(tool: ToolId, x0: number, y0: number, x1: number, y1: number
     id: 'draft', rotation: 0, stroke: s.defaultStroke,
     fill: s.defaultFill, strokeWidth: s.defaultStrokeWidth, strokeStyle: 'solid' as const,
     opacity: 100, roughness: s.defaultRoughness, roundness: 0.3,
-    locked: false, groupId: null, createdAt: Date.now(), updatedAt: Date.now(),
+    locked: false, groupId: null, parentId: null,
+    createdAt: Date.now(), updatedAt: Date.now(),
   };
   if (tool === 'arrow') {
     const el: KreoElement = {
@@ -1610,13 +1688,14 @@ function normalizeShape(el: KreoElement): KreoElement {
 }
 
 /**
- * Ink drawn (or typed) on top of a shape joins that shape: both get the same
- * groupId so they move/resize together and never drift apart.
- * Only attaches ungrouped newcomers to the topmost overlapping shape host.
+ * Ink drawn (or typed, or dropped) on top of a shape attaches to that shape:
+ * the newcomer records the host's id as parentId. Attached children still
+ * select individually on click, but they follow every parent move/resize/
+ * rotate so the two never drift apart. Manual Ctrl+G groups are untouched.
  */
 function attachBelow(list: KreoElement[], createdId: string): KreoElement[] {
   const created = list.find((e) => e.id === createdId);
-  if (!created || created.groupId) return list;
+  if (!created || created.parentId || created.groupId) return list;
   const bb = bboxOf(created);
   if (bb.w <= 0 || bb.h <= 0) return list;
   const hosts = ['rect', 'ellipse', 'diamond', 'triangle', 'image'];
@@ -1627,14 +1706,35 @@ function attachBelow(list: KreoElement[], createdId: string): KreoElement[] {
     const ix = Math.max(0, Math.min(bb.x + bb.w, hb.x + hb.w) - Math.max(bb.x, hb.x));
     const iy = Math.max(0, Math.min(bb.y + bb.h, hb.y + hb.h) - Math.max(bb.y, hb.y));
     if (ix > 2 && iy > 2) {
-      const gid = h.groupId ?? uid('g');
       const now = Date.now();
       return list.map((e) =>
-        e.id === createdId || e.id === h.id ? { ...e, groupId: gid, updatedAt: now } : e
+        e.id === createdId ? { ...e, parentId: h.id, updatedAt: now } : e
       );
     }
   }
   return list;
+}
+
+/**
+ * Selection closure for transforms: selected ids plus all of their attached
+ * descendants (transitively). Locked subtrees are not descended into, so a
+ * locked parent's children stay put.
+ */
+function familyClosure(all: KreoElement[], ids: string[] | Set<string>): Set<string> {
+  const out = new Set(ids);
+  const byId = new Map(all.map((e) => [e.id, e]));
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const el of all) {
+      if (!el.parentId || out.has(el.id) || !out.has(el.parentId)) continue;
+      const parent = byId.get(el.parentId);
+      if (parent && parent.locked) continue;
+      out.add(el.id);
+      grew = true;
+    }
+  }
+  return out;
 }
 
 /**
@@ -1676,7 +1776,7 @@ function finalizeStroke(d: Extract<KreoElement, { type: 'pen' }>, s: AppSettings
   const base = {
     id: d.id, rotation: 0, stroke: d.stroke, fill: 'transparent' as string,
     strokeWidth: d.strokeWidth, strokeStyle: d.strokeStyle, opacity: d.opacity,
-    roughness: d.roughness, roundness: 0.3, locked: false, groupId: null,
+    roughness: d.roughness, roundness: 0.3, locked: false, groupId: null, parentId: null,
     createdAt: Date.now(), updatedAt: Date.now(),
   };
   if (s.autoCorrect) {
@@ -1824,6 +1924,8 @@ function HelpPanel({ onClose }: { onClose: () => void }) {
     ['R D O L A P T E', 'Shapes, arrow, pen, text, eraser'],
     ['Pen sketches', 'Circles, rects, triangles snap to shapes; letters/digits become editable text (toggle in Settings)'],
     ['Ink on shapes', 'Strokes/text drawn on a shape stick to it and move together'],
+    ['Click / double-click', 'Selects one object / selects its whole group'],
+    ['Detach', 'Right-click → Detach from shape, to separate them again'],
     ['Space + drag', 'Pan anywhere'],
     ['Wheel / Shift+wheel', 'Zoom / pan horizontally'],
     ['Ctrl+K', 'Command palette'],

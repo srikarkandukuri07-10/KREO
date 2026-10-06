@@ -48,6 +48,12 @@ interface Base {
   roundness: number; // 0-1 corner radius factor for rect
   locked: boolean;
   groupId: string | null;
+  /**
+   * Attachment: id of the shape this element sits on.
+   * Attached children select/move independently when clicked directly,
+   * but always follow their parent's moves (unlike symmetric groups).
+   */
+  parentId: string | null;
   createdAt: number;
   updatedAt: number;
 }

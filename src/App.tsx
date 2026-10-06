@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import type { Board } from './types';
 import Dashboard from './components/Dashboard';
 import Editor from './components/Editor';
-import { createBoard, decodePortableHash, listBoards, loadBoard, saveBoard } from './lib/storage';
+import { createBoard, decodePortableHash, listBoards, loadBoard, normalizeBoard, saveBoard } from './lib/storage';
 
 type Route =
   | { name: 'dash' }
@@ -115,12 +115,12 @@ function SharedRoute({ id, onExit, notify }: { id: string; onExit: () => void; n
     const decoded = decodePortableHash(window.location.hash);
     if (decoded) {
       const now = Date.now();
-      return {
+      return normalizeBoard({
         id, name: decoded.name, createdAt: now, updatedAt: now,
         elements: decoded.elements, view: { x: 0, y: 0, zoom: 1 },
         share: { mode: 'public' as const, permission: (decoded.permission === 'edit' ? 'edit' : 'view') as 'view' | 'edit' },
         background: decoded.background, grid: false, snap: false,
-      } as Board;
+      } as Board);
     }
     return null;
   });

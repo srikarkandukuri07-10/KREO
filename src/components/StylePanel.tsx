@@ -5,7 +5,7 @@ import { I } from './icons';
 interface Props {
   elements: KreoElement[];
   onPatch: (patch: Partial<KreoElement>) => void;
-  onAction: (a: 'delete' | 'duplicate' | 'group' | 'ungroup' | 'lock' | 'unlock' | 'front' | 'back' | 'forward' | 'backward') => void;
+  onAction: (a: 'delete' | 'duplicate' | 'group' | 'ungroup' | 'detach' | 'lock' | 'unlock' | 'front' | 'back' | 'forward' | 'backward') => void;
 }
 
 const FONTS = [
@@ -203,6 +203,13 @@ export default function StylePanel({ elements, onPatch, onAction }: Props) {
       {/* actions */}
       <div className="kreo-row">
         <h4>Arrange</h4>
+        {elements.some((e) => e.parentId) && (
+          <div className="kreo-seg" style={{ marginBottom: 4 }}>
+            <button onClick={() => onAction('detach')} data-tip="Detach from the shape underneath — moves on its own">
+              Detach from shape
+            </button>
+          </div>
+        )}
         <div className="kreo-seg">
           <button onClick={() => onAction('front')} data-tip="Bring to front">Front</button>
           <button onClick={() => onAction('forward')} data-tip="Bring forward">Fwd</button>
