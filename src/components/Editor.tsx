@@ -5,8 +5,7 @@ import { uid } from '../lib/id';
 import { loadSettings, saveBoard as persistBoard, saveSettings } from '../lib/storage';
 import { bboxOf, contentBounds, hitTest, smoothPoints, snapVal, unrotate } from '../lib/geometry';
 import { renderScene } from '../canvas/renderer';
-import { recognizeStroke } from '../lib/recognize';
-import { matchLetter } from '../lib/alphabet';
+import { beautifyStroke, recognizeStroke } from '../lib/recognize';
 import { BroadcastSync, mergeElements, randomIdentity, type PresenceMsg } from '../lib/collab';
 import { I } from './icons';
 import Toolbar from './Toolbar';
@@ -1739,35 +1738,13 @@ function familyClosure(all: KreoElement[], ids: string[] | Set<string>): Set<str
 
 /**
  * Convert a finished freehand stroke into its final element: a recognized
- * clean shape (ellipse/rect/triangle/diamond/line/arrow) or a recognized
- * handwritten character (real editable text) when auto-correct is on and
- * confident, otherwise the raw smoothed pen stroke.
+ * clean shape (ellipse/rect/triangle/diamond/line/arrow) when auto-correct
+ * is on and confident, otherwise the user's own stroke, cleaned up
+ * (hooks/spikes smoothed) but NEVER replaced — handwriting stays ink.
  */
-const LETTER_SCORE = 0.68;
-const LETTER_STEAL_SCORE = 0.8;
-const LETTER_MIN_DIAG = 24;
-
-/** Build a real editable text element from a recognized character. */
-function makeLetter(char: string, box: { x: number; y: number; w: number; h: number }, base: Record<string, unknown>, s: AppSettings): KreoElement {
-  const c = document.createElement('canvas').getContext('2d')!;
-  let fs = Math.max(8, box.h / 0.72);
-  c.font = `400 ${fs}px ${s.defaultFont}`;
-  const w0 = Math.max(1, c.measureText(char).width);
-  if (w0 > box.w && box.w > 4) fs = Math.max(8, fs * (box.w / w0));
-  c.font = `400 ${fs}px ${s.defaultFont}`;
-  const wpx = c.measureText(char).width;
-  const fsr = Math.round(fs);
-  return {
-    ...base, type: 'text', text: char,
-    x: box.x + Math.max(0, (box.w - wpx) / 2), y: box.y - fs * 0.06,
-    w: Math.max(12, wpx + 10), h: fs * 1.12,
-    fontSize: fsr, fontFamily: s.defaultFont, bold: false, italic: false,
-    align: 'left', lineHeight: 1,
-  } as KreoElement;
-}
-
 function finalizeStroke(d: Extract<KreoElement, { type: 'pen' }>, s: AppSettings): KreoElement {
-  const pts = d.points;
+  const rawPts = d.points;
+  const pts = beautifyStroke(rawPts);
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   for (const p of pts) {
     minX = Math.min(minX, p.x); minY = Math.min(minY, p.y);
@@ -1783,13 +1760,7 @@ function finalizeStroke(d: Extract<KreoElement, { type: 'pen' }>, s: AppSettings
     try {
       const reco = recognizeStroke(pts);
       const box = reco.box;
-      const D = Math.hypot(box.w, box.h);
       if (reco.kind === 'ellipse' || reco.kind === 'rect' || reco.kind === 'diamond') {
-        // small round loops are usually letters (o/O/0), not diagram bubbles
-        if (reco.kind === 'ellipse' && Math.max(box.w, box.h) < 110 && D >= LETTER_MIN_DIAG) {
-          const lm = matchLetter(pts);
-          if (lm && lm.score >= LETTER_STEAL_SCORE) return makeLetter(lm.char, box, base, s);
-        }
         return { ...base, type: reco.kind, x: box.x, y: box.y, w: box.w, h: box.h } as KreoElement;
       }
       if (reco.kind === 'triangle' && reco.corners.length >= 3) {
@@ -1805,28 +1776,18 @@ function finalizeStroke(d: Extract<KreoElement, { type: 'pen' }>, s: AppSettings
         } as KreoElement;
       }
       if ((reco.kind === 'line' || reco.kind === 'arrow') && reco.ends) {
-        // short flicks are usually letter stems (l/1), not diagram lines
-        if (Math.max(box.w, box.h) < 90) {
-          const lm = matchLetter(pts);
-          if (lm && lm.score >= LETTER_STEAL_SCORE) return makeLetter(lm.char, box, base, s);
-        }
         const [a, b] = reco.ends;
         return {
           ...base, type: reco.kind, x: a.x, y: a.y, w: b.x - a.x, h: b.y - a.y,
           ...(reco.kind === 'arrow' ? { startArrow: false, endArrow: true } : {}),
         } as KreoElement;
       }
-      // ambiguous ink: try handwriting before giving up to raw pen
-      if (D >= LETTER_MIN_DIAG) {
-        const lm = matchLetter(pts);
-        if (lm && lm.score >= LETTER_SCORE) return makeLetter(lm.char, box, base, s);
-      }
     } catch {
-      // fall through to raw pen on any recognizer surprise
+      // fall through to the user's own (cleaned) ink on any surprise
     }
   }
   return {
-    ...clone(d), x: minX, y: minY,
+    ...clone(d), points: pts, x: minX, y: minY,
     w: Math.max(1, maxX - minX), h: Math.max(1, maxY - minY), updatedAt: Date.now(),
   };
 }
@@ -1922,7 +1883,7 @@ function HelpPanel({ onClose }: { onClose: () => void }) {
   const rows: [string, string][] = [
     ['V / H', 'Select / Hand'],
     ['R D O L A P T E', 'Shapes, arrow, pen, text, eraser'],
-    ['Pen sketches', 'Circles, rects, triangles snap to shapes; letters/digits become editable text (toggle in Settings)'],
+    ['Pen sketches', 'Circles, rects, triangles snap to shapes; handwriting stays your own ink, smoothed (toggle in Settings)'],
     ['Ink on shapes', 'Strokes/text drawn on a shape stick to it and move together'],
     ['Click / double-click', 'Selects one object / selects its whole group'],
     ['Detach', 'Right-click → Detach from shape, to separate them again'],

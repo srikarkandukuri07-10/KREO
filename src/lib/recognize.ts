@@ -247,3 +247,132 @@ export function recognizeStroke(rawInput: Pt[]): RecoResult {
 
   return penResult(rawInput);
 }
+
+// ─── ink beautification ─────────────────────────────────────────────────────
+// Cleans up a freehand stroke WITHOUT changing what it is: trims overshoot
+// hooks at the ends, drops jitter spikes, smooths once, thins redundant
+// points. Start/end positions are preserved exactly.
+
+function dedupePts(pts: Pt[]): Pt[] {
+  const out: Pt[] = [];
+  for (const p of pts) {
+    if (!out.length || dist(out[out.length - 1], p) > 0.75) out.push({ x: p.x, y: p.y });
+  }
+  return out;
+}
+
+function strokeLen(pts: Pt[]): number {
+  let L = 0;
+  for (let i = 1; i < pts.length; i++) L += dist(pts[i - 1], pts[i]);
+  return L;
+}
+
+function turnDeg(a: Pt, b: Pt, c: Pt): number {
+  const a1 = Math.atan2(b.y - a.y, b.x - a.x);
+  const a2 = Math.atan2(c.y - b.y, c.x - b.x);
+  let d = Math.abs(a2 - a1);
+  if (d > Math.PI) d = 2 * Math.PI - d;
+  return (d * 180) / Math.PI;
+}
+
+/** Cut a short folded-back overshoot hook off one end (mouse overshoot). */
+function trimHookEnd(rs: Pt[], fromStart: boolean): Pt[] {
+  const n = rs.length;
+  if (n < 10) return rs;
+  const total = strokeLen(rs);
+  const budget = Math.min(60, Math.max(15, total * 0.2));
+  // walk j outward from the tip; at(j) maps to the rs index
+  const at = (j: number) => (fromStart ? j : n - 1 - j);
+  // windowed turn: direction averaged over ±3 samples so plain jitter
+  // never counts as a fold
+  const wTurn = (j: number): number => {
+    const a = rs[at(j - 3)], b = rs[at(j)], c = rs[at(j + 3)];
+    return turnDeg(a, b, c);
+  };
+  let acc = 0;
+  let cut = -1;
+  for (let j = 3; j + 3 < n; j++) {
+    acc += dist(rs[at(j - 1)], rs[at(j)]);
+    if (acc > budget) break;
+    if (wTurn(j) > 115) {
+      cut = j;
+      break;
+    }
+  }
+  if (cut < 0) return rs;
+  const kept = fromStart ? rs.slice(at(cut)) : rs.slice(0, at(cut) + 1);
+  return kept.length >= 2 ? kept : rs;
+}
+
+/** Flatten bumps that fold back on an otherwise straight run (jitter jags):
+ * a genuine corner changes the stroke's global direction and is kept;
+ * a bump the line drives straight through gets pulled onto its chord.
+ * Windowed so plain smooth curves never trigger it. */
+function flattenBumps(rs: Pt[]): Pt[] {
+  const out = rs.map((p) => ({ ...p }));
+  // detection windows (small catches narrow jags, large catches wide ones);
+  // flatten span + anchors always wide so bumps pull toward the true run
+  const W = 8;
+  const AW = 10;
+  // run direction is measured well OUTSIDE the suspect feature so a narrow
+  // spike reads as "straight through" while a real corner reads as a turn
+  const DW = 26;
+  const foldedAt = (i: number, w: number): boolean => {
+    if (i - w < 0 || i + w >= out.length) return false;
+    const a = out[i - w], b = out[i], c = out[i + w];
+    const seg = dist(a, b) + dist(b, c);
+    return seg > 1e-9 && dist(a, c) < 0.75 * seg && perpDist(b, a, c) > 2.5;
+  };
+  const dirChange = (a: Pt, b: Pt, c: Pt, d: Pt): number => {
+    const d1 = Math.atan2(b.y - a.y, b.x - a.x);
+    const d2 = Math.atan2(d.y - c.y, d.x - c.x);
+    let dd = Math.abs(d2 - d1);
+    if (dd > Math.PI) dd = 2 * Math.PI - dd;
+    return (dd * 180) / Math.PI;
+  };
+  for (let i = DW; i + DW < out.length; i++) {
+    if (!foldedAt(i, 3) && !foldedAt(i, W)) continue;
+    // direction the run had coming in vs going out (outside the feature):
+    // only near-straight runs get flattened, so curve-hugging bumps and
+    // genuine corners (big direction changes) are never touched
+    if (dirChange(out[i - DW], out[i - W], out[i + W], out[i + DW]) > 20) continue;
+    if (i - W - AW < 0 || i + W + AW >= out.length) continue;
+    const A = out[i - W - AW], B = out[i + W + AW];
+    for (let k = i - W + 1; k < i + W; k++) {
+      const t = (k - (i - W - AW)) / (2 * (W + AW));
+      const tx = A.x + (B.x - A.x) * t, ty = A.y + (B.y - A.y) * t;
+      out[k] = { x: out[k].x + (tx - out[k].x) * 0.75, y: out[k].y + (ty - out[k].y) * 0.75 };
+    }
+    i += W;
+  }
+  return out;
+}
+
+function chaikinOpen(rs: Pt[]): Pt[] {
+  if (rs.length < 3) return rs.map((p) => ({ ...p }));
+  const out: Pt[] = [{ ...rs[0] }];
+  for (let i = 0; i < rs.length - 1; i++) {
+    const a = rs[i], b = rs[i + 1];
+    out.push(
+      { x: a.x * 0.75 + b.x * 0.25, y: a.y * 0.75 + b.y * 0.25 },
+      { x: a.x * 0.25 + b.x * 0.75, y: a.y * 0.25 + b.y * 0.75 }
+    );
+  }
+  out.push({ ...rs[rs.length - 1] });
+  return out;
+}
+
+export function beautifyStroke(input: Pt[]): Pt[] {
+  let rs = dedupePts(input);
+  if (rs.length < 3) return input.map((p) => ({ ...p }));
+  // uniform spacing for stable cleanup
+  const total = Math.max(1e-9, strokeLen(rs));
+  rs = resample(rs, Math.min(400, Math.max(8, Math.round(total / 2.5) + 1)));
+  rs = trimHookEnd(rs, false);
+  rs = trimHookEnd(rs, true);
+  rs = flattenBumps(rs);
+  rs = flattenBumps(rs);
+  rs = chaikinOpen(rs);
+  rs = rdp(rs, 1.0);
+  return rs.length >= 2 ? rs : input.map((p) => ({ ...p }));
+}
