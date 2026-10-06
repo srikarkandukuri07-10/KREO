@@ -3,6 +3,7 @@
 export type ShapeType =
   | 'rect'
   | 'diamond'
+  | 'triangle'
   | 'ellipse'
   | 'line'
   | 'arrow'
@@ -57,6 +58,11 @@ export interface RectEl extends Base {
 export interface DiamondEl extends Base {
   type: 'diamond';
 }
+export interface TriangleEl extends Base {
+  type: 'triangle';
+  /** 3 corner points in world coords (kept in sync with x/y/w/h bbox) */
+  pts: Pt[];
+}
 export interface EllipseEl extends Base {
   type: 'ellipse';
 }
@@ -94,6 +100,7 @@ export interface ImageEl extends Base {
 export type KreoElement =
   | RectEl
   | DiamondEl
+  | TriangleEl
   | EllipseEl
   | LineEl
   | ArrowEl
@@ -137,6 +144,8 @@ export interface AppSettings {
   defaultRoughness: number;
   defaultFont: string;
   autosave: boolean;
+  /** snap freehand pen strokes into clean shapes (circle/rect/triangle/line/arrow) */
+  autoCorrect: boolean;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -151,6 +160,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   defaultRoughness: 1,
   defaultFont: 'Inter, system-ui, sans-serif',
   autosave: true,
+  autoCorrect: true,
 };
 
 export const PALETTE = [

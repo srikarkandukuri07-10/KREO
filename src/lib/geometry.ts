@@ -6,6 +6,15 @@ export function snapVal(v: number, grid: number, enabled: boolean): number {
 }
 
 export function bboxOf(el: KreoElement): { x: number; y: number; w: number; h: number } {
+  if (el.type === 'triangle' && el.pts?.length >= 3) {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const p of el.pts) {
+      minX = Math.min(minX, p.x); minY = Math.min(minY, p.y);
+      maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y);
+    }
+    const pad = (el.strokeWidth || 2) / 2 + 3;
+    return { x: minX - pad, y: minY - pad, w: Math.max(1, maxX - minX + pad * 2), h: Math.max(1, maxY - minY + pad * 2) };
+  }
   if (el.type === 'pen') {
     const pts = el.points;
     if (!pts.length) return { x: el.x, y: el.y, w: 1, h: 1 };
@@ -85,6 +94,23 @@ export function hitTest(el: KreoElement, wx: number, wy: number): boolean {
         { x: b.x + b.w + tol, y: b.y + b.h / 2 },
         { x: b.x + b.w / 2, y: b.y + b.h + tol },
         { x: b.x - tol, y: b.y + b.h / 2 },
+      ]);
+    }
+    case 'triangle': {
+      if (el.pts?.length >= 3) {
+        if (pointInPoly(p.x, p.y, el.pts)) return true;
+        // near-edge counts as a hit (easier grabbing of thin triangles)
+        for (let i = 0; i < el.pts.length; i++) {
+          const a = el.pts[i], b2 = el.pts[(i + 1) % el.pts.length];
+          if (distToSeg(p.x, p.y, a.x, a.y, b2.x, b2.y) <= tol) return true;
+        }
+        return false;
+      }
+      const b = bboxOf(el);
+      return pointInPoly(p.x, p.y, [
+        { x: b.x + b.w / 2, y: b.y - tol },
+        { x: b.x + b.w + tol, y: b.y + b.h + tol },
+        { x: b.x - tol, y: b.y + b.h + tol },
       ]);
     }
     case 'line':

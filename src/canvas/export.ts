@@ -34,6 +34,13 @@ export function elementsToSVG(
         body += `<polygon points="${pts}" fill="${fill(el.fill)}" stroke="${esc(el.stroke)}" stroke-width="${el.strokeWidth}" opacity="${op}"${dash(el)}${tr}/>`;
         break;
       }
+      case 'triangle': {
+        const tri = el.pts?.length >= 3
+          ? el.pts.map((p) => `${p.x},${p.y}`).join(' ')
+          : `${el.x + el.w / 2},${el.y} ${el.x + el.w},${el.y + el.h} ${el.x},${el.y + el.h}`;
+        body += `<polygon points="${tri}" fill="${fill(el.fill)}" stroke="${esc(el.stroke)}" stroke-width="${el.strokeWidth}" opacity="${op}"${dash(el)}${tr}/>`;
+        break;
+      }
       case 'ellipse':
         body += `<ellipse cx="${el.x + el.w / 2}" cy="${el.y + el.h / 2}" rx="${Math.abs(el.w / 2)}" ry="${Math.abs(el.h / 2)}" fill="${fill(el.fill)}" stroke="${esc(el.stroke)}" stroke-width="${el.strokeWidth}" opacity="${op}"${dash(el)}${tr}/>`;
         break;

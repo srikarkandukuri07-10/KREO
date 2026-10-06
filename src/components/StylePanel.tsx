@@ -224,7 +224,7 @@ export default function StylePanel({ elements, onPatch, onAction }: Props) {
 
 function label(t: string): string {
   const m: Record<string, string> = {
-    rect: 'Rectangle', diamond: 'Diamond', ellipse: 'Ellipse', line: 'Line',
+    rect: 'Rectangle', diamond: 'Diamond', triangle: 'Triangle', ellipse: 'Ellipse', line: 'Line',
     arrow: 'Arrow', pen: 'Drawing', text: 'Text', image: 'Image',
   };
   return m[t] ?? t;

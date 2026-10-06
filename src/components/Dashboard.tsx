@@ -124,6 +124,9 @@ function MiniPreview({ board }: { board: Board }) {
   return (
     <svg width="100%" height="100%" viewBox={`${b.x} ${b.y} ${b.w} ${b.h}`} preserveAspectRatio="xMidYMid meet">
       {board.elements.slice(0, 60).map((el) => {
+        if (el.type === 'triangle' && el.pts?.length >= 3) {
+          return <polygon key={el.id} points={el.pts.map((p) => `${p.x},${p.y}`).join(' ')} fill={el.fill === 'transparent' ? 'none' : el.fill} stroke={el.stroke} strokeWidth={Math.max(1, 2 / s)} />;
+        }
         if (el.type === 'rect' || el.type === 'diamond' || el.type === 'ellipse') {
           return <rect key={el.id} x={el.x} y={el.y} width={Math.max(1, el.w)} height={Math.max(1, el.h)} fill={el.fill === 'transparent' ? 'none' : el.fill} stroke={el.stroke} strokeWidth={Math.max(1, 2 / s)} />;
         }

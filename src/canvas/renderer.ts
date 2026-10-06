@@ -211,6 +211,32 @@ function drawElement(
       }
       break;
     }
+    case 'triangle': {
+      const corners: [number, number][] = el.pts?.length >= 3
+        ? el.pts.map((p) => [p.x, p.y] as [number, number])
+        : [
+            [el.x + el.w / 2, el.y],
+            [el.x + el.w, el.y + el.h],
+            [el.x, el.y + el.h],
+          ];
+      if (roughMode) {
+        rc.polygon(corners, {
+          stroke: strokeColor, fill: fillColor,
+          fillStyle: fillColor ? 'solid' : undefined,
+          strokeWidth: sw, roughness: el.roughness * 1.2, seed,
+        });
+      } else {
+        ctx.strokeStyle = strokeColor;
+        ctx.lineWidth = sw;
+        applyStrokeStyle(ctx, el.strokeStyle);
+        ctx.beginPath();
+        corners.forEach(([x, y], i) => (i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y)));
+        ctx.closePath();
+        if (fillColor) { ctx.fillStyle = fillColor; ctx.fill(); }
+        ctx.stroke();
+      }
+      break;
+    }
     case 'ellipse': {
       if (roughMode) {
         rc.ellipse(el.x + el.w / 2, el.y + el.h / 2, el.w, el.h, {

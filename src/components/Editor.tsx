@@ -5,6 +5,7 @@ import { uid } from '../lib/id';
 import { loadSettings, saveBoard as persistBoard, saveSettings } from '../lib/storage';
 import { bboxOf, contentBounds, hitTest, smoothPoints, snapVal, unrotate } from '../lib/geometry';
 import { renderScene } from '../canvas/renderer';
+import { recognizeStroke } from '../lib/recognize';
 import { BroadcastSync, mergeElements, randomIdentity, type PresenceMsg } from '../lib/collab';
 import { I } from './icons';
 import Toolbar from './Toolbar';
@@ -628,7 +629,7 @@ export default function Editor({ initial, readOnly, sharedBanner, onExit, notify
 
     if (isPan) {
       gestureRef.current = {
-        mode: 'pan', startWX: w.x, startWY: w.y,
+        mode: 'pan', startWX: e.clientX, startWY: e.clientY,
         origCamX: viewRef.current.x, origCamY: viewRef.current.y, snapshot: [],
       };
       return;
@@ -637,7 +638,7 @@ export default function Editor({ initial, readOnly, sharedBanner, onExit, notify
     if (readOnlyRef.current) {
       // view-only: allow rubber pan via drag
       gestureRef.current = {
-        mode: 'pan', startWX: w.x, startWY: w.y,
+        mode: 'pan', startWX: e.clientX, startWY: e.clientY,
         origCamX: viewRef.current.x, origCamY: viewRef.current.y, snapshot: [],
       };
       return;
@@ -810,8 +811,15 @@ export default function Editor({ initial, readOnly, sharedBanner, onExit, notify
     const s = settingsRef.current;
 
     if (g.mode === 'pan') {
-      // camera moves opposite to pointer travel in world space
-      setViewBoth({ ...viewRef.current, x: g.origCamX - (w.x - g.startWX), y: g.origCamY - (w.y - g.startWY) });
+      // screen-delta panning: content must track the cursor exactly 1:1.
+      // (Never derive the delta from world coords here — the camera itself
+      // moves each frame, which would feed back and make content slip.)
+      const v = viewRef.current;
+      setViewBoth({
+        ...v,
+        x: g.origCamX - (e.clientX - g.startWX) / v.zoom,
+        y: g.origCamY - (e.clientY - g.startWY) / v.zoom,
+      });
       return;
     }
     if (readOnlyRef.current) return;
@@ -932,16 +940,9 @@ export default function Editor({ initial, readOnly, sharedBanner, onExit, notify
       const d = draftRef.current;
       if (d.type === 'pen' && d.points.length > 1) {
         checkpoint();
-        const pts = d.points;
-        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-        for (const p of pts) {
-          minX = Math.min(minX, p.x); minY = Math.min(minY, p.y);
-          maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y);
-        }
-        d.x = minX; d.y = minY;
-        d.w = Math.max(1, maxX - minX); d.h = Math.max(1, maxY - minY);
-        d.updatedAt = Date.now();
-        const next = [...clone(elsRef.current), clone(d)];
+        const final = finalizeStroke(d, settingsRef.current);
+        let next = [...clone(elsRef.current), final];
+        next = attachBelow(next, final.id);
         applyElements(next);
         // stay unselected so drawing flow is never interrupted by handles
         broadcastElements();
@@ -1400,11 +1401,13 @@ export default function Editor({ initial, readOnly, sharedBanner, onExit, notify
             checkpoint();
             const committed = text;
             const targetId = editingText.id;
-            applyElements(elsRef.current.map((el) =>
+            const mapped = elsRef.current.map((el) =>
               el.id === targetId && el.type === 'text'
                 ? { ...el, text: committed, w: Math.max(60, measureW(committed, el)), h: measureH(committed, el), updatedAt: Date.now() }
                 : el
-            ));
+            );
+            // text typed on top of a shape sticks to that shape
+            applyElements(attachBelow(mapped, targetId));
             broadcastElements();
             // select the finished text so it can be styled/moved right away
             setSelected([targetId]);
@@ -1486,6 +1489,9 @@ function shiftElement<T extends KreoElement>(el: T, dx: number, dy: number): T {
   if (el.type === 'pen') {
     return { ...el, points: el.points.map((p) => ({ x: p.x + dx, y: p.y + dy })), x: el.x + dx, y: el.y + dy, updatedAt: Date.now() };
   }
+  if (el.type === 'triangle') {
+    return { ...el, x: el.x + dx, y: el.y + dy, pts: el.pts.map((p) => ({ x: p.x + dx, y: p.y + dy })), updatedAt: Date.now() };
+  }
   return { ...el, x: el.x + dx, y: el.y + dy, updatedAt: Date.now() };
 }
 
@@ -1531,6 +1537,22 @@ function resizeSnapshot(
     if (el.type === 'text') {
       const a = mapPt(el.x, el.y);
       return { ...el, x: a.x, y: a.y, w: Math.max(20, nw), h: Math.max(10, nh), updatedAt: Date.now() };
+    }
+    if (el.type === 'triangle') {
+      const a = mapPt(el.x, el.y);
+      const ex2 = mapPt(el.x + el.w, el.y + el.h);
+      const mapped = el.pts.map((p) => mapPt(p.x, p.y));
+      let tminX = Infinity, tminY = Infinity, tmaxX = -Infinity, tmaxY = -Infinity;
+      for (const p of mapped) {
+        tminX = Math.min(tminX, p.x); tminY = Math.min(tminY, p.y);
+        tmaxX = Math.max(tmaxX, p.x); tmaxY = Math.max(tmaxY, p.y);
+      }
+      void a; void ex2;
+      return {
+        ...el, x: tminX, y: tminY,
+        w: Math.max(2, tmaxX - tminX), h: Math.max(2, tmaxY - tminY),
+        pts: mapped, updatedAt: Date.now(),
+      };
     }
     const a = mapPt(el.x, el.y);
     const ex2 = mapPt(el.x + el.w, el.y + el.h);
@@ -1584,6 +1606,88 @@ function normalizeShape(el: KreoElement): KreoElement {
     return { ...el, w: 2, h: 2 };
   }
   return el;
+}
+
+/**
+ * Ink drawn (or typed) on top of a shape joins that shape: both get the same
+ * groupId so they move/resize together and never drift apart.
+ * Only attaches ungrouped newcomers to the topmost overlapping shape host.
+ */
+function attachBelow(list: KreoElement[], createdId: string): KreoElement[] {
+  const created = list.find((e) => e.id === createdId);
+  if (!created || created.groupId) return list;
+  const bb = bboxOf(created);
+  if (bb.w <= 0 || bb.h <= 0) return list;
+  const hosts = ['rect', 'ellipse', 'diamond', 'triangle', 'image'];
+  for (let i = list.length - 1; i >= 0; i--) {
+    const h = list[i];
+    if (h.id === createdId || h.locked || !hosts.includes(h.type)) continue;
+    const hb = bboxOf(h);
+    const ix = Math.max(0, Math.min(bb.x + bb.w, hb.x + hb.w) - Math.max(bb.x, hb.x));
+    const iy = Math.max(0, Math.min(bb.y + bb.h, hb.y + hb.h) - Math.max(bb.y, hb.y));
+    if (ix > 2 && iy > 2) {
+      const gid = h.groupId ?? uid('g');
+      const now = Date.now();
+      return list.map((e) =>
+        e.id === createdId || e.id === h.id ? { ...e, groupId: gid, updatedAt: now } : e
+      );
+    }
+  }
+  return list;
+}
+
+/**
+ * Convert a finished freehand stroke into its final element: a recognized
+ * clean shape (ellipse/rect/triangle/diamond/line/arrow) when auto-correct
+ * is on and confident, otherwise the raw smoothed pen stroke.
+ */
+function finalizeStroke(d: Extract<KreoElement, { type: 'pen' }>, s: AppSettings): KreoElement {
+  const pts = d.points;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const p of pts) {
+    minX = Math.min(minX, p.x); minY = Math.min(minY, p.y);
+    maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y);
+  }
+  const base = {
+    id: d.id, rotation: 0, stroke: d.stroke, fill: 'transparent' as string,
+    strokeWidth: d.strokeWidth, strokeStyle: d.strokeStyle, opacity: d.opacity,
+    roughness: d.roughness, roundness: 0.3, locked: false, groupId: null,
+    createdAt: Date.now(), updatedAt: Date.now(),
+  };
+  if (s.autoCorrect) {
+    try {
+      const reco = recognizeStroke(pts);
+      const box = reco.box;
+      if (reco.kind === 'ellipse' || reco.kind === 'rect' || reco.kind === 'diamond') {
+        return { ...base, type: reco.kind, x: box.x, y: box.y, w: box.w, h: box.h } as KreoElement;
+      }
+      if (reco.kind === 'triangle' && reco.corners.length >= 3) {
+        const c = reco.corners.slice(0, 3);
+        let tminX = Infinity, tminY = Infinity, tmaxX = -Infinity, tmaxY = -Infinity;
+        for (const p of c) {
+          tminX = Math.min(tminX, p.x); tminY = Math.min(tminY, p.y);
+          tmaxX = Math.max(tmaxX, p.x); tmaxY = Math.max(tmaxY, p.y);
+        }
+        return {
+          ...base, type: 'triangle', x: tminX, y: tminY,
+          w: Math.max(2, tmaxX - tminX), h: Math.max(2, tmaxY - tminY), pts: c,
+        } as KreoElement;
+      }
+      if ((reco.kind === 'line' || reco.kind === 'arrow') && reco.ends) {
+        const [a, b] = reco.ends;
+        return {
+          ...base, type: reco.kind, x: a.x, y: a.y, w: b.x - a.x, h: b.y - a.y,
+          ...(reco.kind === 'arrow' ? { startArrow: false, endArrow: true } : {}),
+        } as KreoElement;
+      }
+    } catch {
+      // fall through to raw pen on any recognizer surprise
+    }
+  }
+  return {
+    ...clone(d), x: minX, y: minY,
+    w: Math.max(1, maxX - minX), h: Math.max(1, maxY - minY), updatedAt: Date.now(),
+  };
 }
 
 function cursorFor(tool: ToolId, spaceRef: React.MutableRefObject<boolean>): string {
@@ -1677,6 +1781,8 @@ function HelpPanel({ onClose }: { onClose: () => void }) {
   const rows: [string, string][] = [
     ['V / H', 'Select / Hand'],
     ['R D O L A P T E', 'Shapes, arrow, pen, text, eraser'],
+    ['Pen sketches', 'Circles, rects, triangles, lines, arrows auto-correct (toggle in Settings)'],
+    ['Ink on shapes', 'Strokes/text drawn on a shape stick to it and move together'],
     ['Space + drag', 'Pan anywhere'],
     ['Wheel / Shift+wheel', 'Zoom / pan horizontally'],
     ['Ctrl+K', 'Command palette'],

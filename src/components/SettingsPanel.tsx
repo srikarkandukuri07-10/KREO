@@ -33,6 +33,10 @@ export default function SettingsPanel({ settings, boardBackground, onChange, onB
         </div>
 
         <h4 style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '.06em', color: 'var(--muted)', marginTop: 16 }}>Defaults</h4>
+        <Toggle label="Auto-correct strokes to shapes" value={settings.autoCorrect} onChange={(v) => set('autoCorrect', v)} />
+        <p style={{ fontSize: 12, color: 'var(--muted)', lineHeight: 1.6, margin: '2px 0 6px' }}>
+          Circles, rectangles, triangles, lines and arrows you sketch freehand snap into clean shapes.
+        </p>
         <div className="kreo-row" style={{ marginTop: 8 }}>
           <label style={{ fontSize: 13 }}>Stroke width — {settings.defaultStrokeWidth}</label>
           <input type="range" min={1} max={12} step={1} value={settings.defaultStrokeWidth} onChange={(e) => set('defaultStrokeWidth', Number(e.target.value))} aria-label="Default stroke width" />
