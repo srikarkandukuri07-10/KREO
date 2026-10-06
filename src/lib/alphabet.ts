@@ -24,6 +24,20 @@ interface Template {
   pts: Pt[]; // 32 normalized points
   aspect: number; // w/h of the raw waypoint art (case/width signal)
   closed: boolean; // waypoints form a closed loop
+  corners: number; // sharp-turn count (S-vs-5 style disambiguation)
+}
+
+/** Sharp-turn count on a 32-pt stroke: corners like 5's bar vs S's curves. */
+function cornerCount(pts: Pt[]): number {
+  let n = 0;
+  for (let i = 1; i + 1 < pts.length; i++) {
+    const a1 = Math.atan2(pts[i].y - pts[i - 1].y, pts[i].x - pts[i - 1].x);
+    const a2 = Math.atan2(pts[i + 1].y - pts[i].y, pts[i + 1].x - pts[i].x);
+    let d = Math.abs(a2 - a1);
+    if (d > Math.PI) d = 2 * Math.PI - d;
+    if ((d * 180) / Math.PI > 55) n++;
+  }
+  return n;
 }
 
 // [char, flat waypoints in a 0..100 box]
@@ -131,7 +145,14 @@ const TEMPLATES: Template[] = RAW.map(([char, flat]) => {
   const aspect = (maxX - minX) / Math.max(1, maxY - minY);
   const diag = Math.hypot(maxX - minX, maxY - minY);
   const gap = wps.length > 1 ? Math.hypot(wps[0].x - wps[wps.length - 1].x, wps[0].y - wps[wps.length - 1].y) : 0;
-  return { char, pts: normalizeForMatch(wps).pts, aspect, closed: diag > 1e-9 && gap < 0.18 * diag };
+  const norm = normalizeForMatch(wps).pts;
+  return {
+    char,
+    pts: norm,
+    aspect,
+    closed: diag > 1e-9 && gap < 0.18 * diag,
+    corners: cornerCount(norm),
+  };
 });
 
 function avgDist(a: Pt[], b: Pt[]): number {
@@ -140,8 +161,35 @@ function avgDist(a: Pt[], b: Pt[]): number {
   return s / a.length;
 }
 
+/** Start-point-invariant distance for closed loops (try cyclic alignments). */
+function avgDistShift(a: Pt[], b: Pt[], shift: number): number {
+  let s = 0;
+  const n = a.length;
+  for (let i = 0; i < n; i++) {
+    const q = b[(i + shift) % n];
+    s += Math.hypot(a[i].x - q.x, a[i].y - q.y);
+  }
+  return s / n;
+}
+
+function rotatePts(pts: Pt[], ang: number): Pt[] {
+  const c = Math.cos(ang), s = Math.sin(ang);
+  return pts.map((p) => ({ x: p.x * c - p.y * s, y: p.x * s + p.y * c }));
+}
+
+// tilt tolerance: writers slant ±20° without meaning a different character
+// (kept far from 180° so M≠W and 6≠9 stay distinct)
+const SEARCH_ANGLES = [-20, -10, 0, 10, 20].map((d) => (d * Math.PI) / 180);
+
 /** Best template match for a single stroke. Null when too short. */
 export function matchLetter(rawInput: Pt[]): LetterMatch | null {
+  const top = matchTop2(rawInput);
+  if (!top) return null;
+  return top[0];
+}
+
+/** Best two matches (for margin analysis + targeted tiebreaks). */
+export function matchTop2(rawInput: Pt[]): [LetterMatch, LetterMatch] | null {
   const seen = new Set<string>();
   const raw = rawInput.filter((p) => {
     const k = `${Math.round(p.x * 2)},${Math.round(p.y * 2)}`;
@@ -160,23 +208,78 @@ export function matchLetter(rawInput: Pt[]): LetterMatch | null {
   const idiag = Math.hypot(imaxX - iminX, imaxY - iminY);
   const igap = Math.hypot(raw[0].x - raw[raw.length - 1].x, raw[0].y - raw[raw.length - 1].y);
   const inputClosed = idiag > 1e-9 && igap < 0.18 * idiag;
+  const inputCorners = cornerCount(pts);
   const rev = [...pts].reverse();
-  let bestChar = '';
-  let bestCombined = Infinity;
+  let best = { char: '', combined: Infinity };
+  let second = { char: '', combined: Infinity };
   for (const t of TEMPLATES) {
-    const d = Math.min(avgDist(pts, t.pts), avgDist(rev, t.pts));
+    let d = Infinity;
+    for (const ang of SEARCH_ANGLES) {
+      const rp = ang === 0 ? pts : rotatePts(pts, ang);
+      const rr = ang === 0 ? rev : rotatePts(rev, ang);
+      const d0 = Math.min(avgDist(rp, t.pts), avgDist(rr, t.pts));
+      if (d0 < d) d = d0;
+      if (inputClosed && t.closed) {
+        for (let sh = 2; sh < N; sh += 2) {
+          const ds = Math.min(avgDistShift(rp, t.pts, sh), avgDistShift(rr, t.pts, sh));
+          if (ds < d) d = ds;
+        }
+      }
+    }
     // aspect tiebreak (tall '0' vs round 'o', 'C' vs 'c') + closure agreement
+    // + corner agreement (curvy S vs cornered 5)
     const combined =
       d +
       22 * Math.min(1, Math.abs(aspect - t.aspect)) +
-      (inputClosed === t.closed ? 0 : 12);
-    if (combined < bestCombined) {
-      bestCombined = combined;
-      bestChar = t.char;
+      (inputClosed === t.closed ? 0 : 12) +
+      1.4 * Math.abs(inputCorners - t.corners);
+    if (combined < best.combined) {
+      second = best;
+      best = { char: t.char, combined };
+    } else if (combined < second.combined) {
+      second = { char: t.char, combined };
     }
   }
-  const score = Math.max(0, 1 - bestCombined / 70);
-  return { char: bestChar, score };
+  const toScore = (c: number) => Math.max(0, 1 - c / 70);
+  let winner: LetterMatch = { char: best.char, score: toScore(best.combined) };
+  const runner: LetterMatch = { char: second.char, score: toScore(second.combined) };
+  // S-vs-5 tiebreak: a real 5 starts AND ends on the left (top bar, bottom
+  // bowl); an S starts right and ends left. Falls back to top-bar
+  // straightness when both endpoints sit right (unusual stroke orders).
+  // Only consulted when the two are genuinely close.
+  const up = (c: string) => c.toUpperCase();
+  const pair = [up(winner.char), up(runner.char)].sort().join('');
+  if (pair === '5S' && Math.abs(winner.score - runner.score) < 0.12) {
+    const five = up(winner.char) === '5' ? winner : runner;
+    const ess = up(winner.char) === 'S' ? winner : runner;
+    let cx = 0;
+    for (const p of pts) cx += p.x;
+    cx /= pts.length;
+    const leftCount =
+      (pts[0].x < cx ? 1 : 0) + (pts[pts.length - 1].x < cx ? 1 : 0);
+    if (leftCount === 2) {
+      winner = five;
+    } else if (leftCount === 1) {
+      winner = ess;
+    } else {
+      const head = pts.slice(0, 8);
+      const a = head[0], b = head[head.length - 1];
+      const chord = Math.max(1e-9, Math.hypot(b.x - a.x, b.y - a.y));
+      let mx = 0;
+      for (const p of head) {
+        mx = Math.max(
+          mx,
+          Math.abs((p.x - a.x) * (b.y - a.y) - (p.y - a.y) * (b.x - a.x)) / chord
+        );
+      }
+      const full = Math.hypot(
+        pts[pts.length - 1].x - pts[0].x,
+        pts[pts.length - 1].y - pts[0].y
+      );
+      winner = mx / Math.max(1, full) < 0.06 ? five : ess;
+    }
+  }
+  return [winner, runner];
 }
 
 /** For testing: expose template count + raw accessor. */
