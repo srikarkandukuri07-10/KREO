@@ -452,6 +452,12 @@ export default function Editor({ initial, readOnly, sharedBanner, onExit, notify
     draw();
   }, [board.elements, selected, view, settings.grid, board.background, draw]);
 
+  // Safety net: redraw after every render so the canvas can never show stale
+  // refs (e.g. an in-progress stroke when a presence update re-renders).
+  useEffect(() => {
+    draw();
+  });
+
   useEffect(() => {
     const onResize = () => draw();
     window.addEventListener('resize', onResize);
@@ -717,6 +723,8 @@ export default function Editor({ initial, readOnly, sharedBanner, onExit, notify
         ...defaultElement('pen', s),
       } as KreoElement;
       draftRef.current = el;
+      // clear selection so no handles hover over the drawing
+      setSelected([]);
       gestureRef.current = {
         mode: 'pen', startWX: w.x, startWY: w.y, origCamX: 0, origCamY: 0, snapshot: clone(elsRef.current),
       };
@@ -737,7 +745,8 @@ export default function Editor({ initial, readOnly, sharedBanner, onExit, notify
       checkpoint();
       const next = [...clone(elsRef.current), el];
       applyElements(next);
-      setSelected([id]);
+      // no selection while the editor is open — handles would stack under the edit box
+      setSelected([]);
       broadcastElements();
       setTool('select');
       pendingTextRef.current = id;
@@ -934,7 +943,7 @@ export default function Editor({ initial, readOnly, sharedBanner, onExit, notify
         d.updatedAt = Date.now();
         const next = [...clone(elsRef.current), clone(d)];
         applyElements(next);
-        setSelected([d.id]);
+        // stay unselected so drawing flow is never interrupted by handles
         broadcastElements();
       }
       draftRef.current = null;
@@ -974,7 +983,8 @@ export default function Editor({ initial, readOnly, sharedBanner, onExit, notify
     const w = toWorld(e.clientX, e.clientY);
     const hit = pickTop(w.x, w.y);
     if (hit?.type === 'text') {
-      setSelected([hit.id]);
+      // edit without selection chrome; selection is restored on commit/cancel
+      setSelected([]);
       setEditingText({ id: hit.id, draft: hit.text });
     }
   };
@@ -1388,12 +1398,16 @@ export default function Editor({ initial, readOnly, sharedBanner, onExit, notify
               return;
             }
             checkpoint();
+            const committed = text;
+            const targetId = editingText.id;
             applyElements(elsRef.current.map((el) =>
-              el.id === editingText.id && el.type === 'text'
-                ? { ...el, text, w: Math.max(60, measureW(text, el)), h: measureH(text, el), updatedAt: Date.now() }
+              el.id === targetId && el.type === 'text'
+                ? { ...el, text: committed, w: Math.max(60, measureW(committed, el)), h: measureH(committed, el), updatedAt: Date.now() }
                 : el
             ));
             broadcastElements();
+            // select the finished text so it can be styled/moved right away
+            setSelected([targetId]);
             setEditingText(null);
           }}
           onCancel={() => {
@@ -1402,6 +1416,9 @@ export default function Editor({ initial, readOnly, sharedBanner, onExit, notify
             if (el?.type === 'text' && !el.text && !editingText.draft) {
               applyElements(elsRef.current.filter((e) => e.id !== editingText.id));
               setSelected([]);
+            } else {
+              // keep editing target selected so it isn't lost
+              setSelected([editingText.id]);
             }
             setEditingText(null);
           }}
@@ -1649,6 +1666,7 @@ function TextOverlay({ board, view, id, draft, setDraft, onCommit, onCancel }: {
         minHeight: Math.max(40, el.h * view.zoom + 16),
         font: `${el.italic ? 'italic ' : ''}${el.bold ? '700 ' : '400 '}${el.fontSize * view.zoom}px ${el.fontFamily}`,
         color: el.stroke, lineHeight: el.lineHeight, textAlign: el.align,
+        background: board.background,
       }}
     />
   );
